@@ -130,6 +130,7 @@ struct NinjaMain : public BuildLogUser {
   int ToolTargets(const Options* options, int argc, char* argv[]);
   int ToolCommands(const Options* options, int argc, char* argv[]);
   int ToolInputs(const Options* options, int argc, char* argv[]);
+  int ToolTouch(const Options* options, int argc, char* argv[]);
   int ToolClean(const Options* options, int argc, char* argv[]);
   int ToolCleanDead(const Options* options, int argc, char* argv[]);
   int ToolCompilationDatabase(const Options* options, int argc, char* argv[]);
@@ -812,6 +813,95 @@ int NinjaMain::ToolInputs(const Options* options, int argc, char* argv[]) {
   return 0;
 }
 
+int NinjaMain::ToolTouch(const Options* options, int argc, char* argv[]) {
+  // The touch tool uses getopt, and expects argv[0] to contain the name of
+  // the tool, i.e. "touch".
+  argc++;
+  argv--;
+  optind = 1;
+  int opt;
+  const option kLongOptions[] = { { "help", no_argument, NULL, 'h' },
+                                  { NULL, 0, NULL, 0 } };
+  while ((opt = getopt_long(argc, argv, "h", kLongOptions, NULL)) != -1) {
+    switch (opt) {
+    case 'h':
+    default:
+      // clang-format off
+      printf(
+"Usage '-t touch [options] target\n"
+"\n"
+"Touches all input targets of the given target and restats the log file.\n"
+"Note that this includes explicit, implicit and order-only touch, but not\n"
+"validation ones.\n\n"
+"Options:\n"
+"  -h, --help   Print this message.\n");
+      // clang-format on
+      return 1;
+    }
+  }
+  argv += optind;
+  argc -= optind;
+
+  if (argc != 1) {
+    Error("expected exactly one target, got %d", argc);
+    return EXIT_FAILURE;
+  }
+
+  vector<Node*> nodes;
+  string err;
+  if (!CollectTargetsFromArgs(argc, argv, &nodes, &err)) {
+    Error("%s", err.c_str());
+    return 1;
+  }
+
+  std::set<Edge*> seen;
+  std::vector<std::string> result;
+  for (vector<Node*>::iterator in = nodes.begin(); in != nodes.end(); ++in)
+    CollectInputs((*in)->in_edge(), &seen, &result);
+
+  for (size_t n = 0; n < result.size(); ++n) {
+    auto command = "touch " + result[n];
+    std::system(command.c_str());
+  }
+
+  if (!EnsureBuildDirExists())
+    return 1;
+
+  string log_path = ".ninja_log";
+  if (!build_dir_.empty())
+    log_path = build_dir_ + "/" + log_path;
+
+  const LoadStatus status = build_log_.Load(log_path, &err);
+  if (status == LOAD_ERROR) {
+    Error("loading build log %s: %s", log_path.c_str(), err.c_str());
+    return EXIT_FAILURE;
+  }
+  if (status == LOAD_NOT_FOUND) {
+    // Nothing to restat, ignore this
+    return EXIT_SUCCESS;
+  }
+  if (!err.empty()) {
+    // Hack: Load() can return a warning via err by returning LOAD_SUCCESS.
+    Warning("%s", err.c_str());
+    err.clear();
+  }
+
+  bool success = build_log_.Restat(log_path, disk_interface_, 0, NULL, &err);
+  if (!success) {
+    Error("failed recompaction: %s", err.c_str());
+    return EXIT_FAILURE;
+  }
+
+  if (!config_.dry_run) {
+    if (!build_log_.OpenForWrite(log_path, *this, &err)) {
+      Error("opening build log: %s", err.c_str());
+      return EXIT_FAILURE;
+    }
+  }
+
+  return 0;
+}
+
 int NinjaMain::ToolClean(const Options* options, int argc, char* argv[]) {
   // The clean tool uses getopt, and expects argv[0] to contain the name of
   // the tool, i.e. "clean".
@@ -1092,6 +1182,8 @@ const Tool* ChooseTool(const string& tool_name) {
       Tool::RUN_AFTER_LOAD, &NinjaMain::ToolCommands },
     { "inputs", "list all inputs required to rebuild given targets",
       Tool::RUN_AFTER_LOAD, &NinjaMain::ToolInputs},
+    { "touch", "touches all inputs and restats them in the build log",
+      Tool::RUN_AFTER_LOAD, &NinjaMain::ToolTouch},
     { "deps", "show dependencies stored in the deps log",
       Tool::RUN_AFTER_LOGS, &NinjaMain::ToolDeps },
     { "missingdeps", "check deps log dependencies on generated files",
